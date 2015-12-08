@@ -1,0 +1,336 @@
+---
+title: "A Look At Daily Returns of the S&P 500"
+author: "Rex Macey"
+date: "December 6, 2015"
+output: html_document
+---
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+setwd("~/Quant Trading/sp_daily")
+library(quantmod)
+library(TTR)
+library(xts)
+library(timeDate)
+library(FinCal)
+library(RQuantLib)
+library(lubridate)
+
+
+tradingDayOfMonth <- function(myDate, calendar = "UnitedStates/NYSE") {
+    FirstOfMonth <- as.Date(paste(year(myDate), month(myDate), "01", sep="/")) 
+    businessDaysBetween(calendar, from = FirstOfMonth, to = myDate,
+                        includeFirst = 1, includeLast = 1)+1
+}
+tradingDaysLeftInMonth <- function(myDate, calendar = "UnitedStates/NYSE") {
+    EOM <- getEndOfMonth(calendar = "UnitedStates/NYSE",myDate)
+    businessDaysBetween(calendar, from = myDate, to = EOM,
+                        includeFirst = 1, includeLast = 1)+1
+}
+DaysFromLastHoliday <- function(myDate, hdays,calendar = "UnitedStates/NYSE"){
+    d <- hdays[hdays<myDate]
+    businessDaysBetween(calendar, from = d[which.min(abs(myDate-d))], to = myDate,
+                        includeFirst = 1, includeLast = F)
+}
+DaysTilNextHoliday <- function(myDate, hdays,calendar = "UnitedStates/NYSE"){
+    d <- hdays[hdays>myDate]
+    businessDaysBetween(calendar, from = myDate, to = d[which.min(abs(myDate-d))],
+                        includeFirst = 1, includeLast = F)
+}
+ReplwNA <- function(x, threshold){ # replace a vector with NA if value exceeds threshold
+    x[x>threshold]<-NA
+    return(x)
+}
+
+spx<-readRDS("spx.rds")
+rownames(spx)<-spx$Date
+spx$Date=NULL
+spx<-as.quantmod.OHLC(spx,c("Open","High","Low","Close","Volume","Adjusted"),name="spx")
+colnames(spx)<-c("Open","High","Low","Close","Volume","Adjusted")
+spx.ret<-xts(spx, order.by = as.Date(index(spx)))
+spx.ret<-dailyReturn(spx.ret,leading=FALSE)
+if (TRUE){
+    data<-spx[,"Close",drop=FALSE]
+    colnames(data)<-"Close"
+    data$SMA2<-data$Close/SMA(data$Close,2) # Close relative to simple moving average
+    data$SMA5<-data$Close/SMA(data$Close,5)
+    data$SMA10<-data$Close/SMA(data$Close,10)
+    data$SMA20<-data$Close/SMA(data$Close,20)
+    data$SMA50<-data$Close/SMA(data$Close,50)
+    data$SMA200<-data$Close/SMA(data$Close,200)
+    data$SMA50_200<-SMA(data$Close,50) - SMA(data$Close,200) # 50d SMA -  200d SMA
+    data$BB<-BBands(data$Close)[,4] # %B of Bollinger Band
+    data$wday<-factor(weekdays(index(data),TRUE)) # day of week
+    data$tdayofmonth<-sapply(index(data),tradingDayOfMonth) # trading day of month
+    data$tdaysleft<-sapply(index(data),tradingDaysLeftInMonth) # trading day remaining in month
+    data$month<-factor(month(index(data))) # month
+    data$vol5<-rollapply(data.frame(spx.ret),5,sd,fill=NA) # 5 day vol
+    data$vol10<-rollapply(data.frame(spx.ret),10,sd,fill=NA) #10 day vol
+    data$volchg=data$vol5-data$vol10 # 5d vol - 10d vol (change in vol)
+    NYSEhdays<-as.Date(holidayNYSE(year(index(data)[1]):(year(index(data)[nrow(data)])+1)))
+    data$daysfromhday <- sapply(index(data),DaysFromLastHoliday,hdays=NYSEhdays)
+    data$daystilhday <- sapply(index(data),DaysTilNextHoliday,hdays=NYSEhdays)
+    data$SMA50_200Factor<-data[,"SMA50_200"]>=0
+    data$ret <- spx.ret
+    saveRDS(data,"data.rds")
+} else {
+    data<-readRDS("data.rds")
+}
+data[,"tdayofmonth"]<-ReplwNA(data[,"tdayofmonth"],10)
+data[,"tdaysleft"]<-ReplwNA(data[,"tdaysleft"],10)
+data[,"daysfromhday"]<-ReplwNA(data[,"daysfromhday"],10)
+data[,"daystilhday"]<-ReplwNA(data[,"daystilhday"],10)
+```
+Let's look at daily returns of the S&P 500. Here we have daily returns on the S&P 500 from `r format(index(spx[1]),"%B %d, %Y")` through `r format(index(spx[nrow(spx)]),"%B %d, %Y")`.  Note that the early data effectively only has closing prices. More recent data has open/high/low and close.  There are `r format(nrow(spx),nsmall=0,width=5)` prices (and `r format(nrow(spx)-1,nsmall=0,width=5)` returns)
+```{r}
+head(spx)
+tail(spx)
+```
+```{r echo=FALSE}
+plot(spx$Close,log="y",main="Daily Value of S&P 500 Index", ylab="Close",xlab="",col="blue")
+```
+Let's look at the distribution of daily returns.  We see that the worst daily return was `r paste0(round(100*min(spx.ret,na.rm=T),2),"%")`. This occurred on `r format(index(spx.ret)[which.min(spx.ret)],"%B %d, %Y")`.  The best return was `r paste0(round(100*max(spx.ret,na.rm=T),2),"%")` which occurred on `r format(index(spx.ret)[which.max(spx.ret)],"%B %d, %Y")`.
+```{r echo=FALSE}
+summary(spx.ret)
+```
+A histogram shows the vast majority are clustered near 0%, but the scale indicates there are rare, large outliers.  Recall there are `r format(nrow(spx)-1,nsmall=0,width=5)` daily returns in our dataset.
+
+```{r echo=FALSE}
+hist(spx.ret, main="Histogram of Daily Returns",xlab="",ylab="Frequency")
+```
+
+```{r echo=FALSE}
+par(mfrow=c(1,2))
+b1<-boxplot(coredata(spx.ret), main="Boxplot of Daily Returns w Outliers",xlab="",ylab="Return",col="blue",notch=F, outline=T,
+        pars=list(boxwex=1.5))
+boxplot(coredata(spx.ret), main="Boxplot of Daily Returns w/o Outliers",xlab="",ylab="Return",col="blue",notch=F, outline=F,
+        pars=list(boxwex=1.5))
+par(mfrow=c(1,1))
+```
+
+The boxplots show the dispersion as well.  The blue boxes contain one-half of the observations.  The whiskers (horizontal lines outside the blue) are 1.5x the width of the boxes.  Points beyond the whiskers are outliers. About `r paste0(round(100*length(b1$out)/b1$n,1),"%")` of the data are outliers using this definition.
+
+# Can we do better than average?
+
+Again the average and median daily returns are `r paste0(round(100*mean(spx.ret,na.rm=T),4),"%")` and `r paste0(round(100*median(spx.ret,na.rm=T),4),"%")` respectively. An investment of $1 would have grown to `r paste0("$",round(prod(1+spx.ret,na.rm=TRUE),2))` ignoring taxes and dividends.   The question is can we identify type of days which might be better than others?
+
+```{r echo=FALSE}
+
+```
+Let's start with an example called the turn of the month anomoly.  With this we will only invest for the 3 trading days before and after the turn of the month.  
+
+```{r echo=FALSE}
+g<-data[,"tdayofmonth"]<=3 | data[,"tdaysleft"]<=3
+
+par(mfrow=c(1,2))
+b1<-boxplot(coredata(spx.ret), main="All Daily Returns",xlab="",ylab="Return",col="blue",notch=F, outline=F,
+        pars=list(boxwex=1.5), ylim=c(b1$stats[1],b1$stats[5]))
+lab.y<-c(b1$stats[4]+.75*(b1$stats[4]-b1$stats[2]),
+         b1$stats[4]+.50*(b1$stats[4]-b1$stats[2]),
+         b1$stats[4]+.25*(b1$stats[4]-b1$stats[2]))
+lab.text<-c(paste0("Mean=",round(100*mean(spx.ret,na.rm=T),4),"%"),
+            paste0("Median=",round(100*median(spx.ret,na.rm=T),4),"%"),
+            paste0("#obs=",sum(!is.na(spx.ret))))
+text(.75,lab.y,labels=lab.text)
+b2<-boxplot(coredata(spx.ret[g]), main="'Turn of the Month' Returns",xlab="",ylab="Return",col="green",notch=F, outline=F,
+        pars=list(boxwex=1.5), ylim=c(b1$stats[1],b1$stats[5]))
+lab.text<-c(paste0("Mean=",round(100*mean(spx.ret[g],na.rm=T),4),"%"),
+            paste0("Median=",round(100*median(spx.ret[g],na.rm=T),4),"%"),
+            paste0("#obs=",sum(!is.na(spx.ret[g]))))
+text(.75,lab.y,labels=lab.text)
+z<-(mean(spx.ret[g],na.rm=T)-mean(spx.ret,na.rm=T))/(sd(spx.ret[g],na.rm=T)/sqrt(sum(!is.na(spx.ret[g]))))
+p<-pnorm(z)
+lab.text<-c(paste0("     z=",format(round(z,3),nsmall=3,width=6,digits=5)),
+            paste0("pvalue=",format(round(1-p,4),nsmall=4,width=6,digits=5,scientific = F)),"")
+text(1.25,lab.y,labels=lab.text)
+abline(h=b1$stats[3],col="blue")
+abline(h=b1$stats[2],col="blue", lty=2)
+abline(h=b1$stats[4],col="blue", lty=2)
+par(mfrow=c(1,1))
+```
+
+The average return around the turn of the month is significantly different from the average daily return.  In fact it is about `r paste0(round(mean(spx.ret[g],na.rm=T)/mean(spx.ret,na.rm=T),1),"x")` higher.  That said, these only account for `r paste0(round(100*sum(g,na.rm=T)/sum(!is.na(spx.ret)),1),"%")` of the observations.  If one only invested on these days, $1 would have grown into `r paste0("$",round(prod(1+spx.ret[g],na.rm=T),2))`.   
+
+```{r echo=FALSE}
+sumnotisna<-function(x){
+    sum(!is.na(x))
+}
+fld.stats<-function(stat.params,data){
+    fld<-stat.params$field
+    desc<-stat.params$desc
+    df<-data.frame(data[,c(fld,"ret")])
+    out<-list()
+    out$popmean<-mean(df$ret,na.rm=T)
+    out$popsd<-sd(df$ret,na.rm=T)
+    agg.ret<-aggregate(df,by=list(df[,fld]),FUN=mean,na.rm=T)
+    agg.n<-aggregate(df,by=list(df[,fld]),FUN=sumnotisna)
+    agg.sd<-aggregate(df,by=list(df[,fld]),FUN=sd,na.rm=T)
+    agg.z<-(agg.ret$ret-out$popmean)/(agg.sd$ret/sqrt(agg.n$ret))
+    agg.p<-1-pnorm(agg.ret$ret,mean=out$popmean,sd=agg.sd$ret/sqrt(agg.n$ret))
+    agg<-data.frame(ret=agg.ret$ret)
+    agg$n<-agg.n$ret
+    agg$sd<-agg.sd$ret
+    agg$sd.up<-agg$sd*sqrt((agg$n-1)/qchisq(.025,agg$n-1))
+    agg$sd.dn<-agg$sd*sqrt((agg$n-1)/qchisq(1-.025,agg$n-1))
+    agg$z<-agg.z
+    agg$p<-agg.p
+    out$agg<-agg
+    barplot(out$agg$ret,names.arg=row.names(out$agg),
+                  main=paste("Average returns by",desc),
+                  col="blue",ylab="Mean Return",xlab=desc)
+    abline(h=out$popmean,col="red")
+    out$box1<-boxplot(as.formula(paste0("ret~",fld)),data=df,
+                      main=paste("Returns by",desc),
+                      col="blue",ylab="Return",xlab=desc,
+                      names.arg=row.names(out$agg))
+    out$box2<-boxplot(as.formula(paste0("ret~",fld)),data=df,outline=F,
+                      main=paste("Returns by",desc),
+                      col="blue",ylab="Return",xlab=desc,
+                      names.arg=row.names(out$agg))
+    abline(h=out$popmean,col="red")
+    out$bar2<-barplot(out$agg$z,col="blue",names.arg=row.names(out$agg),
+                      main=paste("z-values by",desc),ylab="z value",xlab=desc,
+                      sub="z value is (avgret - popmean)/(sd/sqrt(n))",ylim=c(-3,3))
+    abline(h=qnorm(0.95),col="gray",lty=2)
+    abline(h=qnorm(0.99),col="gray",lty=3)
+    abline(h=qnorm(0.05),col="gray",lty=2)
+    abline(h=qnorm(0.01),col="gray",lty=3)
+    text(x=nrow(out$agg)/2,y=c(qnorm(0.01),qnorm(0.05),qnorm(0.95),qnorm(0.99)),
+         labels=c("1% Probability","5% Probability","95% Probability","99% Probability"))
+    
+    out$sdplot<-barplot(out$agg$sd,col="blue",
+                        main=paste("Standard Deviations by ",desc),
+                        ylab="Standard Deviation",
+                        xlab=desc,names.arg=row.names(out$agg))
+    segments(out$sdplot,out$agg$sd.dn,out$sdplot,out$agg$sd.up,col="green",lwd=6)
+    epsilon=0.25
+    segments(out$sdplot-epsilon,out$agg$sd.dn,
+             out$sdplot+epsilon,out$agg$sd.dn,col="green",lwd=3)
+    segments(out$sdplot-epsilon,out$agg$sd.up,
+             out$sdplot+epsilon,out$agg$sd.up,col="green",lwd=3)
+    abline(h=out$popsd,col="red")
+}
+```
+
+
+
+# Calendar Month
+```{r echo=FALSE}
+stat.params<-list(field="month",desc="Calendar Month")
+print(fld.stats(stat.params,data))
+```
+
+# Trading Day of Month
+```{r echo=FALSE}
+stat.params<-list(field="tdayofmonth",desc="Trading Day of Month")
+print(fld.stats(stat.params,data))
+```
+
+# Trading Days Left in Month
+```{r echo=FALSE}
+stat.params<-list(field="tdaysleft",desc="Trading Days Left in Month")
+print(fld.stats(stat.params,data))
+```
+
+# Day of Week
+```{r echo=FALSE}
+stat.params<-list(field="wday",desc="Weekday")
+print(fld.stats(stat.params,data))
+```
+
+# Days from Holiday
+```{r echo=FALSE}
+stat.params<-list(field="daysfromhday",desc="Days from Holiday")
+print(fld.stats(stat.params,data))
+```
+
+# Days until Holiday
+```{r echo=FALSE}
+stat.params<-list(field="daystilhday",desc="Days til Holiday")
+print(fld.stats(stat.params,data))
+```
+
+# SMA2 - Price / 2 day simple moving average
+```{r echo=FALSE}
+sma2_qtile<-cut(data[,"SMA2"],quantile(data[,"SMA2"],c(0,.2,.4,.6,.8,1),na.rm=TRUE))
+data<-cbind(data,sma2_qtile)
+stat.params<-list(field="sma2_qtile",desc="Quintile of Price/SMA2")
+print(fld.stats(stat.params,data))
+```
+
+# SMA5 - Price / 5 day simple moving average
+```{r echo=FALSE}
+sma5_qtile<-cut(data[,"SMA5"],quantile(data[,"SMA5"],c(0,.2,.4,.6,.8,1),na.rm=TRUE))
+data<-cbind(data,sma5_qtile)
+stat.params<-list(field="sma5_qtile",desc="Quintile of Price/SMA5")
+print(fld.stats(stat.params,data))
+```
+
+# SMA10 - Price / 10 day simple moving average
+```{r echo=FALSE}
+sma10_qtile<-cut(data[,"SMA10"],quantile(data[,"SMA10"],c(0,.2,.4,.6,.8,1),na.rm=TRUE))
+data<-cbind(data,sma10_qtile)
+stat.params<-list(field="sma10_qtile",desc="Quintile of Price/SMA10")
+print(fld.stats(stat.params,data))
+```
+
+# SMA20 - 20 day simple moving average
+```{r echo=FALSE}
+sma20_qtile<-cut(data[,"SMA20"],quantile(data[,"SMA20"],c(0,.2,.4,.6,.8,1),na.rm=TRUE))
+data<-cbind(data,sma20_qtile)
+stat.params<-list(field="sma20_qtile",desc="Quintile of Price/SMA20")
+print(fld.stats(stat.params,data))
+```
+
+# SMA50 - 50 day simple moving average
+```{r echo=FALSE}
+sma50_qtile<-cut(data[,"SMA50"],quantile(data[,"SMA50"],c(0,.2,.4,.6,.8,1),na.rm=TRUE))
+data<-cbind(data,sma50_qtile)
+stat.params<-list(field="sma50_qtile",desc="Quintile of Price/SMA50")
+print(fld.stats(stat.params,data))
+```
+
+# SMA200 - 200 day simple moving average
+```{r echo=FALSE}
+sma200_qtile<-cut(data[,"SMA200"],quantile(data[,"SMA200"],c(0,.2,.4,.6,.8,1),na.rm=TRUE))
+data<-cbind(data,sma200_qtile)
+stat.params<-list(field="sma200_qtile",desc="Quintile of Price/SMA200")
+print(fld.stats(stat.params,data))
+```
+
+# SMA50_200 - 50d SMA - 200d SMA
+```{r echo=FALSE}
+sma50_200_qtile<-cut(data[,"SMA50_200"],quantile(data[,"SMA50_200"],c(0,.2,.4,.6,.8,1),na.rm=TRUE))
+data<-cbind(data,sma50_200_qtile)
+stat.params<-list(field="sma50_200_qtile",desc="Quintile of SMA50 - SMA200")
+print(fld.stats(stat.params,data))
+```
+
+# BB  - Bollinger Band 
+```{r echo=FALSE}
+bb_qtile<-cut(data[,"BB"],quantile(data[,"BB"],c(0,.2,.4,.6,.8,1),na.rm=TRUE))
+data<-cbind(data,bb_qtile)
+stat.params<-list(field="bb_qtile",desc="Quintile of Bollinger Band")
+print(fld.stats(stat.params,data))
+```
+
+# vol5 - 5 day Volatility
+```{r echo=FALSE}
+vol5_qtile<-cut(data[,"vol5"],quantile(data[,"vol5"],c(0,.2,.4,.6,.8,1),na.rm=TRUE))
+data<-cbind(data,vol5_qtile)
+stat.params<-list(field="vol5_qtile",desc="Quintile of 5d Volatility")
+print(fld.stats(stat.params,data))
+```
+# vol10 - 10 day Volatility
+```{r echo=FALSE}
+vol10_qtile<-cut(data[,"vol10"],quantile(data[,"vol10"],c(0,.2,.4,.6,.8,1),na.rm=TRUE))
+data<-cbind(data,vol10_qtile)
+stat.params<-list(field="vol10_qtile",desc="Quintile of 10d Volatility")
+print(fld.stats(stat.params,data))
+```
+# volchg - 5 day - 10 day volatility 
+```{r echo=FALSE}
+volchg_qtile<-cut(data[,"volchg"],quantile(data[,"volchg"],c(0,.2,.4,.6,.8,1),na.rm=TRUE))
+data<-cbind(data,volchg_qtile)
+stat.params<-list(field="volchg_qtile",desc="Quintile of 5d-10d Volatility Change")
+print(fld.stats(stat.params,data))
+```
