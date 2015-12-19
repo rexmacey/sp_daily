@@ -1,0 +1,201 @@
+---
+title: "SP500 Model"
+author: "Rex Macey"
+date: "December 14, 2015"
+output: html_document
+---
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+setwd("~/Quant Trading/sp_daily")
+library(quantmod)
+library(TTR)
+library(xts)
+library(timeDate)
+library(FinCal)
+library(RQuantLib)
+library(lubridate)
+
+
+tradingDayOfMonth <- function(myDate, calendar = "UnitedStates/NYSE") {
+    FirstOfMonth <- as.Date(paste(year(myDate), month(myDate), "01", sep="/")) 
+    businessDaysBetween(calendar, from = FirstOfMonth, to = myDate,
+                        includeFirst = 1, includeLast = 1)+1
+}
+tradingDaysLeftInMonth<-function(myDate){
+    EOM <- getEndOfMonth(calendar = "UnitedStates/NYSE",myDate)
+    days<-seq(from=myDate, to = EOM,by=1)
+    return(sum(isBusinessDay("UnitedStates/NYSE",days)))
+}
+DaysFromLastHoliday <- function(myDate, hdays,calendar = "UnitedStates/NYSE"){
+    d <- hdays[hdays<myDate]
+    businessDaysBetween(calendar, from = d[which.min(abs(myDate-d))], to = myDate,
+                        includeFirst = 1, includeLast = F)
+}
+DaysTilNextHoliday <- function(myDate, hdays,calendar = "UnitedStates/NYSE"){
+    d <- hdays[hdays>myDate]
+    businessDaysBetween(calendar, from = myDate, to = d[which.min(abs(myDate-d))],
+                        includeFirst = 1, includeLast = F)
+}
+ReplwNA <- function(x, threshold){ # replace a vector with NA if value exceeds threshold
+    x[x>threshold]<-NA
+    return(x)
+}
+
+Event <- function(x, threshold=1.0, from="below"){
+    # Return T if previous value is below (above) threshold and current value is >= (<=) 
+    # the treshold when from = below (above)
+    z<-matrix(rep(x,2),nrow=length(x),ncol=2)
+    z[2:length(x),1]<-z[1:(length(x)-1),2]
+    if (from=="below" | from=="b"){
+        out<-z[,1]<threshold & z[,2]>=threshold
+    } else {
+        out<-z[,1]>threshold & z[,2]<=threshold
+    }
+    out[is.na(out)]<-FALSE    
+    return(out)
+}
+spx<-readRDS("spx.rds")
+rownames(spx)<-spx$Date
+spx$Date=NULL
+spx<-as.quantmod.OHLC(spx,c("Open","High","Low","Close","Volume","Adjusted"),name="spx")
+colnames(spx)<-c("Open","High","Low","Close","Volume","Adjusted")
+spx.ret<-xts(spx, order.by = as.Date(index(spx)))
+spx.ret<-dailyReturn(spx.ret,leading=FALSE)*100
+
+if (FALSE){
+    data<-spx[,"Close",drop=FALSE]
+    colnames(data)<-"Close"
+    data$SMA2<-data$Close/SMA(data$Close,2) # Close relative to simple moving average
+    data$SMA5<-data$Close/SMA(data$Close,5)
+    data$SMA10<-data$Close/SMA(data$Close,10)
+    data$SMA20<-data$Close/SMA(data$Close,20)
+    data$SMA50<-data$Close/SMA(data$Close,50)
+    data$SMA200<-data$Close/SMA(data$Close,200)
+    data$SMA50_200<- data$SMA200/data$SMA50 # 50d SMA /  200d SMA
+    data$BB<-BBands(data$Close)[,4] # %B of Bollinger Band
+    data$wday<-factor(weekdays(index(data),TRUE),
+                      levels=c("Mon","Tue","Wed","Thu","Fri")
+                     ) # day of week
+    data$tdayofmonth<-sapply(index(data),tradingDayOfMonth) # trading day of month
+    data$tdaysleft<-sapply(index(data),tradingDaysLeftInMonth) # trading day remaining in month
+    data$month<-factor(month(index(data))) # month
+    data$vol5<-rollapply(data.frame(spx.ret),5,sd,fill=NA) # 5 day vol
+    data$vol10<-rollapply(data.frame(spx.ret),10,sd,fill=NA) #10 day vol
+    data$volchg=data$vol5-data$vol10 # 5d vol - 10d vol (change in vol)
+    NYSEhdays<-as.Date(holidayNYSE(year(index(data)[1]):(year(index(data)[nrow(data)])+1)))
+    data$daysfromhday <- sapply(index(data),DaysFromLastHoliday,hdays=NYSEhdays)
+    data$daystilhday <- sapply(index(data),DaysTilNextHoliday,hdays=NYSEhdays)
+    data$SMA50_200Factor<-data[,"SMA50_200"]>=1
+    data$E_SMA2xb<-Event(data$SMA2,1,"b")
+    data$E_SMA2xa<-Event(data$SMA2,1,"a")
+    data$E_SMA5xb<-Event(data$SMA5,1,"b")
+    data$E_SMA5xa<-Event(data$SMA5,1,"a")
+    data$E_SMA10xb<-Event(data$SMA10,1,"b")
+    data$E_SMA10xa<-Event(data$SMA10,1,"a")
+    data$E_SMA20xb<-Event(data$SMA20,1,"b")
+    data$E_SMA20xa<-Event(data$SMA20,1,"a")
+    data$E_SMA50xb<-Event(data$SMA50,1,"b")
+    data$E_SMA50xa<-Event(data$SMA50,1,"a")
+    data$E_SMA200xb<-Event(data$SMA200,1,"b")
+    data$E_SMA200xa<-Event(data$SMA200,1,"a")
+    data$E_SMA50_200xb<-Event(data$SMA50_200,1,"b")
+    data$E_SMA50_200xa<-Event(data$SMA50_200,1,"a")
+    data$ret <- lag(spx.ret,-2)
+    data<-data[complete.cases(data),]
+    saveRDS(data,"data_mdl.rds")
+} else {
+    data<-readRDS("data_mdl.rds")
+}
+```
+
+Let's see if we can make some useful predictions about future daily returns of the stock market.  Our dataset is derived entirely from daily prices of the S&P 500 since 1950. This analysis ignores dividends and transaction costs. Even the weak form of the Efficient Market Hypothesis holds that past prices should give no information about future returns.  This analysis casts doubt on that claim.  
+
+## Description of Features
+The features used in this model closely follow what was described in "A Look At Daily Returns of the S&P 500". Six variables are defined by the closing price divided by 2d, 5d, 10d, 20d, 50d, and 200d simple moving averages. We also calculate the SMA50/SMA200.  Another variable is %B calculation associated with Bollinger bands which is scaled such that 0 represents the price at the lower band and 1 at the higher band.  We have a factor variables representing the day of the week and the month. We measure the trading day of the month, the trading days left in the month the days from the last holiday and the days until the next holiday.  We calculate the volatility (standard deviation) over the last 5d and 10d and the change in volatility (vol5 - vol10).  For each of the SMA variables, we define two event variables.  One is true is the SMA crosses 1.0 from below and the other is true if the SMA crosses from above.  
+
+## Description of the Response (Y) Variable
+In this model we are trying to predict the return for one day two days in the future.  For example, if today is Monday, we predict Wednesday.  We don't use Tuesday because if we have to wait for Monday's close we can't execute at Monday's close; we have to trade on Tuesday.  We considered using Tuesday's opening price, but the open data was sparse.  To an extent we are being conservative (but we still need to consider transaction costs).
+
+## Summary of the Data
+```{r}
+summary(data)
+train.idx<-seq(1:floor(nrow(data)/2))
+train<-data[train.idx,]
+test<-data[-train.idx,]
+```
+
+## The First Model
+We have `r nrow(data)` observations with complete data.  We use the first `r nrow(train.idx)` to train our model.  The others are reserved for testing.  For our first model we build a random forest named rf1. The model output also includes a measure of variable importance shown here.
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+library(doParallel)
+cl<-makeCluster(3)
+registerDoParallel(cl)
+library(caret)
+if (FALSE){
+    rf1<-train(ret~.,data = train,method="rf")
+    saveRDS(rf1,file="rf1.rds")
+} else{
+    rf1<-readRDS("rf1.rds")
+}
+print(rf1)
+print(rf1$finalModel$importance)
+```
+
+## Performance of the model
+Our model essentially predicts the return for the day after tomorrow. For evaluation purposes, we want to consider an approach which might allow us to profit from the prediction.  The obvious rule would be to be long the market when the prediction is non-negative and to be short when the prediction is negative.  This means our focus should be on seeing how well we are able to predict up and down days in the market.  We start with looking at results using our training (in-sample) data. We basically take the training data and feed it into the rf1 model to predict the returns. Not surprisingly, the results are excellent.
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+pred<-predict(rf1) #original training set
+pred_neg_idx<-pred<0
+pred_neg<-train[pred_neg_idx,"ret"]
+pred_pos<-train[!pred_neg_idx,"ret"]
+summary_train<-rbind(summary(pred_neg),summary(pred_pos),summary(train[,"ret"]))
+pred_neg_neg<-round(100*sum(pred_neg<0)/length(pred_neg),1)
+pred_pos_neg<-round(100*sum(pred_pos<0)/length(pred_pos),1)
+act_neg<-round(100*sum(train[,"ret"]<0)/nrow(train),1)
+summary_train<-cbind(summary_train,rbind(pred_neg_neg,pred_pos_neg,act_neg))
+rownames(summary_train)<-c("Pred Neg","Pred Pos","All")
+colnames(summary_train)[7]<-"% Neg"
+print(summary_train)
+```
+
+We used the Caret package to generate the model. It returns a set of predictions different from those above. I believe, but am not positive, that these predictions are the result of 10 fold cross-validation where 9/10th of the training data was used to build a model to predict the other 1/10th. This is repeated 10 times so all the observations have predictions. This approach should give us an indication of how well the model will perform out of sample.  The results of these predictions follow.  The results are worse than those above but still promising.  
+
+```{r echo=FALSE}
+pred_neg_idx<-rf1$finalModel$predicted<0 # cross validated?
+pred_neg<-train[pred_neg_idx,"ret"]
+pred_pos<-train[!pred_neg_idx,"ret"]
+summary_train<-rbind(summary(pred_neg),summary(pred_pos),summary(train[,"ret"]))
+pred_neg_neg<-round(100*sum(pred_neg<0)/length(pred_neg),1)
+pred_pos_neg<-round(100*sum(pred_pos<0)/length(pred_pos),1)
+act_neg<-round(100*sum(train[,"ret"]<0)/nrow(train),1)
+summary_train<-cbind(summary_train,rbind(pred_neg_neg,pred_pos_neg,act_neg))
+rownames(summary_train)<-c("Pred Neg","Pred Pos","All")
+colnames(summary_train)[7]<-"% Neg"
+print(summary_train)
+```
+
+### Out of Sample Results
+Now we turn to using the rf1 model to predict returns using the test data which the model has not seen before. It's worth noting that our training and test sets each span over 30 years.  Thus over half the predictions below are based on a model using data over a decade old.  Even still, the results indicate that we are able to discriminate between positive and negative days.  There is a higher percentage of negative days in those we predict will be negative (52.5%) than in the overall data (46.5%).  Only 41.5% of the returns are negative for the days we predict will be positive. The model did fail to predict that Black Monday in October 1987 would be negative.
+
+```{r echo=FALSE}
+pred<-predict(rf1,newdata=test) #test set
+pred_neg_idx<-pred<0
+pred_neg<-test[pred_neg_idx,"ret"]
+pred_pos<-test[!pred_neg_idx,"ret"]
+summary_test<-rbind(summary(pred_neg),summary(pred_pos),summary(test[,"ret"]))
+pred_neg_neg<-round(100*sum(pred_neg<0)/length(pred_neg),1)
+pred_pos_neg<-round(100*sum(pred_pos<0)/length(pred_pos),1)
+act_neg<-round(100*sum(test[,"ret"]<0)/nrow(test),1)
+summary_test<-cbind(summary_test,rbind(pred_neg_neg,pred_pos_neg,act_neg))
+rownames(summary_test)<-c("Pred Neg","Pred Pos","All")
+colnames(summary_test)[7]<-"% Neg"
+strategy<-prod(1-pred_neg/100)*prod(1+pred_pos/100)
+bh<-prod(1+test[,"ret"]/100)
+print(summary_test)
+```
+
+From an economic standpoint, if we had invested $1 in the market (buy and hold) it would have grown to $`r round(bh,2)`.  If we had invested $1 in a strategy that invested in the market when our prediction was positive and shorted it when it was negative, it would have grown to $`r round(strategy,2)` over the same period.
+
+# Remarks
+In the variable importance, I not that Price was left in and seemed to be important.  I find it peculiar that that variable would be of value.  Another model leaving out many variables will produce almost identical performance.  
+
+Transaction costs are an issue.  We need to analyze whether there are streaks of predicted negative value.  Streaks reduce transaction costs.  If every other day is predicted to be negative, we'd execute more frequently and incur higher costs than if we had 3 days of negative followed by 3 days of positive predictions.  This model is only a simple random forest.  Other algorithms might do better.  This approach uses one period of data to predict returns.  We'd likely be better off expanding our window. Roughly this means using the data from 1950-1980 to predict 1981; 1950-1981 to predict 1982 and so forth. We might be able to profit more with the use of leverage or scaling our investment based on the size of the predicted return. 
